@@ -45,7 +45,7 @@ internal static class StructuredOutput
                     """),
                 new(ChatRole.User, listingText),
             };
-            var response = await chatClient.CompleteAsync<PropertyDetails>(messages); // If using Ollama or an OpenAI model that supports it, add useNativeJsonSchema:true
+            var response = await chatClient.GetResponseAsync<PropertyDetails>(messages); // If using an OpenAI model that supports it, add useNativeJsonSchema:true
 
             if (response.TryGetResult(out var info))
             {
