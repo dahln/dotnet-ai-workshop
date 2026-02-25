@@ -31,13 +31,15 @@ public static class UsePromptBasedFunctionCallingStep
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         };
 
-        public override async Task<ChatCompletion> CompleteAsync(IList<ChatMessage> chatMessages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+        public override async Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> chatMessages, ChatOptions? options = null, CancellationToken cancellationToken = default)
         {
             // Our goal is to convert tools into a prompt describing them, then to detect tool calls in the
             // response and convert those into FunctionCallContent.
             if (options?.Tools is { Count: > 0 })
             {
-                AddOrUpdateToolPrompt(chatMessages, options.Tools);
+                var modifiableMessages = chatMessages as IList<ChatMessage> ?? chatMessages.ToList();
+                chatMessages = modifiableMessages;
+                AddOrUpdateToolPrompt(modifiableMessages, options.Tools);
                 options = options.Clone();
                 options.Tools = null;
 
@@ -50,7 +52,7 @@ public static class UsePromptBasedFunctionCallingStep
                 // Since the point of this client is to avoid relying on the underlying model having
                 // native tool call support, we have to replace any "tool" or "toolcall" messages with
                 // "user" or "assistant" ones.
-                foreach (var message in chatMessages)
+                foreach (var message in modifiableMessages)
                 {
                     for (var itemIndex = 0; itemIndex < message.Contents.Count; itemIndex++)
                     {
@@ -72,12 +74,12 @@ public static class UsePromptBasedFunctionCallingStep
                 }
             }
 
-            var result = await base.CompleteAsync(chatMessages, options, cancellationToken);
+            var result = await base.GetResponseAsync(chatMessages, options, cancellationToken);
 
-            if (result.Choices.FirstOrDefault()?.Text is { } content && content.IndexOf("<tool_call_json>", StringComparison.Ordinal) is int startPos
+            if (result.Messages.FirstOrDefault()?.Text is { } content && content.IndexOf("<tool_call_json>", StringComparison.Ordinal) is int startPos
                 && startPos >= 0)
             {
-                var message = result.Choices.First();
+                var message = result.Messages.First();
                 var contentItem = message.Contents.SingleOrDefault();
                 content = content.Substring(startPos);
 
@@ -155,7 +157,8 @@ public static class UsePromptBasedFunctionCallingStep
             }
 
             var toolDescriptorsJson = JsonSerializer.Serialize(tools.OfType<AIFunction>().Select(ToToolDescriptor), _jsonOptions);
-            existingToolPrompt.Text = $$"""
+            existingToolPrompt.Contents.Clear();
+            existingToolPrompt.Contents.Add(new TextContent($$"""
             {{MessageIntro}}
 
             For each function call, return a JSON object with the function name and arguments within <tool_call_json></tool_call_json> XML tags
@@ -170,23 +173,52 @@ public static class UsePromptBasedFunctionCallingStep
 
             Here are the available tools:
             <tools>{{toolDescriptorsJson}}</tools>
-            """;
+            """));
         }
 
         private static ToolDescriptor ToToolDescriptor(AIFunction tool) => new()
         {
-            Name = tool.Metadata.Name,
-            Description = tool.Metadata.Description,
-            Arguments = tool.Metadata.Parameters.ToDictionary(
-                p => p.Name,
-                p => new ToolParameterDescriptor
-                {
-                    Type = p.ParameterType?.Name,
-                    Description = p.Description,
-                    Enum = p.ParameterType?.IsEnum == true ? Enum.GetNames(p.ParameterType) : null,
-                    Required = p.IsRequired,
-                }),
+            Name = tool.Name,
+            Description = tool.Description,
+            Arguments = BuildArguments(tool.JsonSchema),
         };
+
+        // Parses AIFunction.JsonSchema (JSON Schema object format) into a ToolParameterDescriptor map.
+        // Expected schema shape: { "properties": { "name": { "type": "...", "description": "...", "enum": [...] } }, "required": [...] }
+        private static IDictionary<string, ToolParameterDescriptor>? BuildArguments(JsonElement schema)
+        {
+            if (!schema.TryGetProperty("properties", out var properties))
+                return null;
+
+            var required = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (schema.TryGetProperty("required", out var requiredArr))
+            {
+                foreach (var req in requiredArr.EnumerateArray())
+                {
+                    if (req.GetString() is { } name)
+                        required.Add(name);
+                }
+            }
+
+            var result = new Dictionary<string, ToolParameterDescriptor>();
+            foreach (var prop in properties.EnumerateObject())
+            {
+                string? type = prop.Value.TryGetProperty("type", out var typeEl) ? typeEl.GetString() : null;
+                string? description = prop.Value.TryGetProperty("description", out var descEl) ? descEl.GetString() : null;
+                string[]? enumValues = null;
+                if (prop.Value.TryGetProperty("enum", out var enumEl))
+                    enumValues = enumEl.EnumerateArray().Select(e => e.GetString()!).ToArray();
+
+                result[prop.Name] = new ToolParameterDescriptor
+                {
+                    Type = type,
+                    Description = description,
+                    Enum = enumValues,
+                    Required = required.Contains(prop.Name),
+                };
+            }
+            return result;
+        }
 
         private sealed class ToolDescriptor
         {

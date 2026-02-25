@@ -15,14 +15,12 @@ hostBuilder.Services.AddLogging(builder => builder.AddConsole().SetMinimumLevel(
 // Register an IChatClient
 var azureOpenAiConfig = hostBuilder.Configuration.GetRequiredSection("AzureOpenAI");
 var innerChatClient = new AzureOpenAIClient(new Uri(azureOpenAiConfig["Endpoint"]!), new ApiKeyCredential(azureOpenAiConfig["Key"]!))
-    .AsChatClient("gpt-4o-mini");
-// Or for Ollama:
-//IChatClient innerChatClient = new OllamaChatClient(new Uri("http://localhost:11434"), "llama3.1");
+    .GetChatClient("gpt-4o-mini")
+    .AsIChatClient();
 
-hostBuilder.Services.AddChatClient(pipeline => pipeline
-    .UseFunctionInvocation()
-    // .UsePromptBasedFunctionCalling() // Needed to make functions work at all on many Ollama models, and often improves those that support it anyway
-    .Use(innerChatClient));
+hostBuilder.Services.AddChatClient(innerChatClient)
+    .UseFunctionInvocation();
+    // .UsePromptBasedFunctionCalling(); // Improves function calling for models that need it
 
 // Run the app
 var app = hostBuilder.Build();
